@@ -19,6 +19,7 @@ package service
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -336,10 +337,84 @@ func (s *ServiceController) persistUpdate(service *api.Service) error {
 	return err
 }
 
+func parseNodeSelector(selector string) (map[string]string, error) {
+
+	lines := strings.Split(selector, ",")
+
+	ret := map[string]string{}
+
+	for _, l := range lines {
+		kv := strings.Split(l, "=")
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("Parse node selector rule failed:%s", selector)
+		}
+		ret[kv[0]] = kv[1]
+	}
+	return ret, nil
+}
+
 func (s *ServiceController) createLoadBalancer(service *api.Service) error {
 	nodes, err := s.nodeLister.List()
 	if err != nil {
 		return err
+	}
+
+	annotations := service.GetAnnotations()
+
+	if annotations, ok := annotations["weixinhost.com/node-label-eq"]; ok && (annotations != "" && annotations != "*") {
+
+		var newNodes api.NodeList
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return err
+		}
+
+		for _, node := range nodes.Items {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] != v {
+					cond = false
+					break
+				}
+			}
+
+			if cond {
+				newNodes.Items = append(newNodes.Items, node)
+			}
+		}
+
+		nodes = newNodes
+
+	}
+
+	if annotations, ok := annotations["weixinhost.com/node-label-neq"]; ok && (annotations != "") {
+		if annotations == "*" {
+			return fmt.Errorf("Not supported * at annotations weixinhost.com/node-label-neq")
+		}
+		var newNodes api.NodeList
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return err
+		}
+
+		for _, node := range nodes.Items {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] == v {
+					cond = false
+					break
+				}
+			}
+			if cond {
+				newNodes.Items = append(newNodes.Items, node)
+			}
+		}
+
+		nodes = newNodes
 	}
 
 	// - Only one protocol supported per service
