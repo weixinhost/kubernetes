@@ -496,6 +496,7 @@ func (nc *NodeController) monitorNodeStatus() error {
 				}
 			}
 
+/*
 			// Check with the cloud provider to see if the node still exists. If it
 			// doesn't, delete the node immediately.
 			if currentReadyCondition.Status != api.ConditionTrue && nc.cloud != nil {
@@ -519,6 +520,7 @@ func (nc *NodeController) monitorNodeStatus() error {
 					continue
 				}
 			}
+*/
 		}
 	}
 	nc.handleDisruption(zoneToNodeConditions, nodes)
