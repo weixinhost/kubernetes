@@ -344,6 +344,7 @@ func parseNodeSelector(selector string) (map[string]string, error) {
 	ret := map[string]string{}
 
 	for _, l := range lines {
+		l = strings.TrimSpace(l)
 		kv := strings.Split(l, "=")
 		if len(kv) != 2 {
 			return nil, fmt.Errorf("Parse node selector rule failed:%s", selector)
