@@ -353,11 +353,7 @@ func parseNodeSelector(selector string) (map[string]string, error) {
 	return ret, nil
 }
 
-func (s *ServiceController) createLoadBalancer(service *api.Service) error {
-	nodes, err := s.nodeLister.List()
-	if err != nil {
-		return err
-	}
+func (s *ServiceController) filterNodeListWithAnnotationAndNodeList(service *api.Service, nodes api.NodeList) (*api.NodeList, error) {
 
 	annotations := service.GetAnnotations()
 
@@ -368,7 +364,7 @@ func (s *ServiceController) createLoadBalancer(service *api.Service) error {
 		kv, err := parseNodeSelector(annotations)
 
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		for _, node := range nodes.Items {
@@ -391,14 +387,14 @@ func (s *ServiceController) createLoadBalancer(service *api.Service) error {
 
 	if annotations, ok := annotations["weixinhost.com/node-label-neq"]; ok && (annotations != "") {
 		if annotations == "*" {
-			return fmt.Errorf("Not supported * at annotations weixinhost.com/node-label-neq")
+			return nil, fmt.Errorf("Not supported * at annotations weixinhost.com/node-label-neq")
 		}
 		var newNodes api.NodeList
 
 		kv, err := parseNodeSelector(annotations)
 
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		for _, node := range nodes.Items {
@@ -416,6 +412,85 @@ func (s *ServiceController) createLoadBalancer(service *api.Service) error {
 
 		nodes = newNodes
 	}
+
+	return &nodes, nil
+
+}
+
+func (s *ServiceController) filterNodeListWithAnnotationAndNodeSlice(service *api.Service, nodes []*api.Node) ([]*api.Node, error) {
+
+	annotations := service.GetAnnotations()
+
+	if annotations, ok := annotations["weixinhost.com/node-label-eq"]; ok && (annotations != "" && annotations != "*") {
+
+		var newNodes []*api.Node
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, node := range nodes {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] != v {
+					cond = false
+					break
+				}
+			}
+
+			if cond {
+				newNodes = append(newNodes, node)
+			}
+		}
+		nodes = newNodes
+	}
+
+	if annotations, ok := annotations["weixinhost.com/node-label-neq"]; ok && (annotations != "") {
+		if annotations == "*" {
+			return nil, fmt.Errorf("Not supported * at annotations weixinhost.com/node-label-neq")
+		}
+		var newNodes []*api.Node
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, node := range nodes {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] == v {
+					cond = false
+					break
+				}
+			}
+
+			if cond {
+				newNodes = append(newNodes, node)
+			}
+		}
+		nodes = newNodes
+	}
+
+	return nodes, nil
+}
+
+func (s *ServiceController) createLoadBalancer(service *api.Service) error {
+	nodes, err := s.nodeLister.List()
+	if err != nil {
+		return err
+	}
+
+	temp, err := s.filterNodeListWithAnnotationAndNodeList(service, nodes)
+
+	if err != nil {
+		return err
+	}
+
+	nodes = *temp
 
 	// - Only one protocol supported per service
 	// - Not all cloud providers support all protocols and the next step is expected to return
@@ -705,11 +780,12 @@ func (s *ServiceController) nodeSyncLoop() {
 		glog.Errorf("Failed to retrieve current set of nodes from node lister: %v", err)
 		return
 	}
+
 	newHosts := hostsFromNodeSlice(nodes)
 	if stringSlicesEqual(newHosts, s.knownHosts) {
 		// The set of nodes in the cluster hasn't changed, but we can retry
 		// updating any services that we failed to update last time around.
-		s.servicesToUpdate = s.updateLoadBalancerHosts(s.servicesToUpdate, newHosts)
+		s.servicesToUpdate = s.updateLoadBalancerHosts(s.servicesToUpdate, nodes)
 		return
 	}
 	glog.Infof("Detected change in list of current cluster nodes. New node set: %v", newHosts)
@@ -718,7 +794,7 @@ func (s *ServiceController) nodeSyncLoop() {
 	// round.
 	s.servicesToUpdate = s.cache.allServices()
 	numServices := len(s.servicesToUpdate)
-	s.servicesToUpdate = s.updateLoadBalancerHosts(s.servicesToUpdate, newHosts)
+	s.servicesToUpdate = s.updateLoadBalancerHosts(s.servicesToUpdate, nodes)
 	glog.Infof("Successfully updated %d out of %d load balancers to direct traffic to the updated set of nodes",
 		numServices-len(s.servicesToUpdate), numServices)
 
@@ -728,12 +804,18 @@ func (s *ServiceController) nodeSyncLoop() {
 // updateLoadBalancerHosts updates all existing load balancers so that
 // they will match the list of hosts provided.
 // Returns the list of services that couldn't be updated.
-func (s *ServiceController) updateLoadBalancerHosts(services []*api.Service, hosts []string) (servicesToRetry []*api.Service) {
+func (s *ServiceController) updateLoadBalancerHosts(services []*api.Service, nodes []*api.Node) (servicesToRetry []*api.Service) {
 	for _, service := range services {
 		func() {
 			if service == nil {
 				return
 			}
+
+			newNodes, err := s.filterNodeListWithAnnotationAndNodeSlice(service, nodes)
+			if err != nil {
+				return
+			}
+			hosts := hostsFromNodeSlice(newNodes)
 			if err := s.lockedUpdateLoadBalancerHosts(service, hosts); err != nil {
 				glog.Errorf("External error while updating load balancer: %v.", err)
 				servicesToRetry = append(servicesToRetry, service)
