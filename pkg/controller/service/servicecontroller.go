@@ -19,6 +19,7 @@ package service
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -356,6 +357,148 @@ func (s *ServiceController) persistUpdate(service *v1.Service) error {
 	return err
 }
 
+func parseNodeSelector(selector string) (map[string]string, error) {
+
+	lines := strings.Split(selector, ",")
+
+	ret := map[string]string{}
+
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		kv := strings.Split(l, "=")
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("Parse node selector rule failed:%s", selector)
+		}
+		ret[kv[0]] = kv[1]
+	}
+	return ret, nil
+}
+
+func (s *ServiceController) filterNodeListWithAnnotationAndNodeList(service *v1.Service, nodes v1.NodeList) (*v1.NodeList, error) {
+
+	annotations := service.GetAnnotations()
+
+	if annotations, ok := annotations["weixinhost.com/node-label-eq"]; ok && (annotations != "" && annotations != "*") {
+
+		var newNodes v1.NodeList
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, node := range nodes.Items {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] != v {
+					cond = false
+					break
+				}
+			}
+
+			if cond {
+				newNodes.Items = append(newNodes.Items, node)
+			}
+		}
+
+		nodes = newNodes
+
+	}
+
+	if annotations, ok := annotations["weixinhost.com/node-label-neq"]; ok && (annotations != "") {
+		if annotations == "*" {
+			return nil, fmt.Errorf("Not supported * at annotations weixinhost.com/node-label-neq")
+		}
+		var newNodes v1.NodeList
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, node := range nodes.Items {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] == v {
+					cond = false
+					break
+				}
+			}
+			if cond {
+				newNodes.Items = append(newNodes.Items, node)
+			}
+		}
+
+		nodes = newNodes
+	}
+
+	return &nodes, nil
+
+}
+
+func (s *ServiceController) filterNodeListWithAnnotationAndNodeSlice(service *v1.Service, nodes []*v1.Node) ([]*v1.Node, error) {
+
+	annotations := service.GetAnnotations()
+
+	if annotations, ok := annotations["weixinhost.com/node-label-eq"]; ok && (annotations != "" && annotations != "*") {
+
+		var newNodes []*v1.Node
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, node := range nodes {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] != v {
+					cond = false
+					break
+				}
+			}
+
+			if cond {
+				newNodes = append(newNodes, node)
+			}
+		}
+		nodes = newNodes
+	}
+
+	if annotations, ok := annotations["weixinhost.com/node-label-neq"]; ok && (annotations != "") {
+		if annotations == "*" {
+			return nil, fmt.Errorf("Not supported * at annotations weixinhost.com/node-label-neq")
+		}
+		var newNodes []*v1.Node
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, node := range nodes {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] == v {
+					cond = false
+					break
+				}
+			}
+
+			if cond {
+				newNodes = append(newNodes, node)
+			}
+		}
+		nodes = newNodes
+	}
+
+	return nodes, nil
+}
+
 func (s *ServiceController) createLoadBalancer(service *v1.Service) (*v1.LoadBalancerStatus, error) {
 	nodes, err := s.nodeLister.List(labels.Everything())
 	if err != nil {
@@ -368,6 +511,14 @@ func (s *ServiceController) createLoadBalancer(service *v1.Service) (*v1.LoadBal
 			lbNodes = append(lbNodes, nodes[ix])
 		}
 	}
+
+	temp, err := s.filterNodeListWithAnnotationAndNodeList(service, lbNodes)
+
+	if err != nil {
+		return err
+	}
+
+	lbNodes = *temp
 
 	// - Only one protocol supported per service
 	// - Not all cloud providers support all protocols and the next step is expected to return
@@ -675,6 +826,14 @@ func (s *ServiceController) updateLoadBalancerHosts(services []*v1.Service, host
 			if service == nil {
 				return
 			}
+
+			newNodes, err := s.filterNodeListWithAnnotationAndNodeSlice(service, hosts)
+			if err != nil {
+				return
+			}
+
+			hosts = newNodes
+
 			if err := s.lockedUpdateLoadBalancerHosts(service, hosts); err != nil {
 				glog.Errorf("External error while updating load balancer: %v.", err)
 				servicesToRetry = append(servicesToRetry, service)
