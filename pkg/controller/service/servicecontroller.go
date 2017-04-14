@@ -374,70 +374,6 @@ func parseNodeSelector(selector string) (map[string]string, error) {
 	return ret, nil
 }
 
-func (s *ServiceController) filterNodeListWithAnnotationAndNodeList(service *v1.Service, nodes v1.NodeList) (*v1.NodeList, error) {
-
-	annotations := service.GetAnnotations()
-
-	if annotations, ok := annotations["weixinhost.com/node-label-eq"]; ok && (annotations != "" && annotations != "*") {
-
-		var newNodes v1.NodeList
-
-		kv, err := parseNodeSelector(annotations)
-
-		if err != nil {
-			return nil, err
-		}
-
-		for _, node := range nodes.Items {
-			cond := true
-			for k, v := range kv {
-				if node.Labels[k] != v {
-					cond = false
-					break
-				}
-			}
-
-			if cond {
-				newNodes.Items = append(newNodes.Items, node)
-			}
-		}
-
-		nodes = newNodes
-
-	}
-
-	if annotations, ok := annotations["weixinhost.com/node-label-neq"]; ok && (annotations != "") {
-		if annotations == "*" {
-			return nil, fmt.Errorf("Not supported * at annotations weixinhost.com/node-label-neq")
-		}
-		var newNodes v1.NodeList
-
-		kv, err := parseNodeSelector(annotations)
-
-		if err != nil {
-			return nil, err
-		}
-
-		for _, node := range nodes.Items {
-			cond := true
-			for k, v := range kv {
-				if node.Labels[k] == v {
-					cond = false
-					break
-				}
-			}
-			if cond {
-				newNodes.Items = append(newNodes.Items, node)
-			}
-		}
-
-		nodes = newNodes
-	}
-
-	return &nodes, nil
-
-}
-
 func (s *ServiceController) filterNodeListWithAnnotationAndNodeSlice(service *v1.Service, nodes []*v1.Node) ([]*v1.Node, error) {
 
 	annotations := service.GetAnnotations()
@@ -512,7 +448,7 @@ func (s *ServiceController) createLoadBalancer(service *v1.Service) (*v1.LoadBal
 		}
 	}
 
-	temp, err := s.filterNodeListWithAnnotationAndNodeList(service, lbNodes)
+	temp, err := s.filterNodeListWithAnnotationAndNodeSlice(service, lbNodes)
 
 	if err != nil {
 		return err
