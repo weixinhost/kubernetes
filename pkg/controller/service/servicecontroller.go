@@ -448,18 +448,16 @@ func (s *ServiceController) createLoadBalancer(service *v1.Service) (*v1.LoadBal
 		}
 	}
 
-	temp, err := s.filterNodeListWithAnnotationAndNodeSlice(service, lbNodes)
+	newLbNodes, err := s.filterNodeListWithAnnotationAndNodeSlice(service, lbNodes)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	lbNodes = *temp
 
 	// - Only one protocol supported per service
 	// - Not all cloud providers support all protocols and the next step is expected to return
 	//   an error for unsupported protocols
-	return s.balancer.EnsureLoadBalancer(s.clusterName, service, lbNodes)
+	return s.balancer.EnsureLoadBalancer(s.clusterName, service, newLbNodes)
 }
 
 // ListKeys implements the interface required by DeltaFIFO to list the keys we
