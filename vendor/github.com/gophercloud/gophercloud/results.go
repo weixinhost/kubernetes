@@ -3,8 +3,10 @@ package gophercloud
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"time"
 )
@@ -60,6 +62,125 @@ func (r Result) ExtractInto(to interface{}) error {
 	return err
 }
 
+func (r Result) extractIntoPtr(to interface{}, label string) error {
+	if label == "" {
+		return r.ExtractInto(&to)
+	}
+
+	var m map[string]interface{}
+	err := r.ExtractInto(&m)
+	if err != nil {
+		return err
+	}
+
+	b, err := json.Marshal(m[label])
+	if err != nil {
+		return err
+	}
+
+	toValue := reflect.ValueOf(to)
+	if toValue.Kind() == reflect.Ptr {
+		toValue = toValue.Elem()
+	}
+
+	switch toValue.Kind() {
+	case reflect.Slice:
+		typeOfV := toValue.Type().Elem()
+		if typeOfV.Kind() == reflect.Struct {
+			if typeOfV.NumField() > 0 && typeOfV.Field(0).Anonymous {
+				newSlice := reflect.MakeSlice(reflect.SliceOf(typeOfV), 0, 0)
+				newType := reflect.New(typeOfV).Elem()
+
+				for _, v := range m[label].([]interface{}) {
+					b, err := json.Marshal(v)
+					if err != nil {
+						return err
+					}
+
+					for i := 0; i < newType.NumField(); i++ {
+						s := newType.Field(i).Addr().Interface()
+						err = json.NewDecoder(bytes.NewReader(b)).Decode(s)
+						if err != nil {
+							return err
+						}
+					}
+					newSlice = reflect.Append(newSlice, newType)
+				}
+				toValue.Set(newSlice)
+			}
+		}
+	case reflect.Struct:
+		typeOfV := toValue.Type()
+		if typeOfV.NumField() > 0 && typeOfV.Field(0).Anonymous {
+			for i := 0; i < toValue.NumField(); i++ {
+				toField := toValue.Field(i)
+				if toField.Kind() == reflect.Struct {
+					s := toField.Addr().Interface()
+					err = json.NewDecoder(bytes.NewReader(b)).Decode(s)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+
+	err = json.Unmarshal(b, &to)
+	return err
+}
+
+// ExtractIntoStructPtr will unmarshal the Result (r) into the provided
+// interface{} (to).
+//
+// NOTE: For internal use only
+//
+// `to` must be a pointer to an underlying struct type
+//
+// If provided, `label` will be filtered out of the response
+// body prior to `r` being unmarshalled into `to`.
+func (r Result) ExtractIntoStructPtr(to interface{}, label string) error {
+	if r.Err != nil {
+		return r.Err
+	}
+
+	t := reflect.TypeOf(to)
+	if k := t.Kind(); k != reflect.Ptr {
+		return fmt.Errorf("Expected pointer, got %v", k)
+	}
+	switch t.Elem().Kind() {
+	case reflect.Struct:
+		return r.extractIntoPtr(to, label)
+	default:
+		return fmt.Errorf("Expected pointer to struct, got: %v", t)
+	}
+}
+
+// ExtractIntoSlicePtr will unmarshal the Result (r) into the provided
+// interface{} (to).
+//
+// NOTE: For internal use only
+//
+// `to` must be a pointer to an underlying slice type
+//
+// If provided, `label` will be filtered out of the response
+// body prior to `r` being unmarshalled into `to`.
+func (r Result) ExtractIntoSlicePtr(to interface{}, label string) error {
+	if r.Err != nil {
+		return r.Err
+	}
+
+	t := reflect.TypeOf(to)
+	if k := t.Kind(); k != reflect.Ptr {
+		return fmt.Errorf("Expected pointer, got %v", k)
+	}
+	switch t.Elem().Kind() {
+	case reflect.Slice:
+		return r.extractIntoPtr(to, label)
+	default:
+		return fmt.Errorf("Expected pointer to slice, got: %v", t)
+	}
+}
+
 // PrettyPrintJSON creates a string containing the full response body as
 // pretty-printed JSON. It's useful for capturing test fixtures and for
 // debugging extraction bugs. If you include its output in an issue related to
@@ -103,9 +224,8 @@ type HeaderResult struct {
 	Result
 }
 
-// ExtractHeader will return the http.Header and error from the HeaderResult.
-//
-//   header, err := objects.Create(client, "my_container", objects.CreateOpts{}).ExtractHeader()
+// ExtractInto allows users to provide an object into which `Extract` will
+// extract the http.Header headers of the result.
 func (r HeaderResult) ExtractInto(to interface{}) error {
 	if r.Err != nil {
 		return r.Err

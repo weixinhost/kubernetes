@@ -1,15 +1,17 @@
 package trusts
 
-import "github.com/gophercloud/gophercloud/openstack/identity/v3/tokens"
-
+// TrusteeUser represents the trusted user ID of a trust.
 type TrusteeUser struct {
 	ID string `json:"id"`
 }
 
+// TrustorUser represents the trusting user ID of a trust.
 type TrustorUser struct {
 	ID string `json:"id"`
 }
 
+// Trust represents a delegated authorization request between two
+// identities.
 type Trust struct {
 	ID                 string      `json:"id"`
 	Impersonation      bool        `json:"impersonation"`
@@ -19,11 +21,7 @@ type Trust struct {
 	RedelegationCount  int         `json:"redelegation_count"`
 }
 
-type Token struct {
-	tokens.Token
-	Trust Trust `json:"OS-TRUST:trust"`
-}
-
+// TokenExt represents an extension of the base token result.
 type TokenExt struct {
-	Token Token `json:"token"`
+	Trust Trust `json:"OS-TRUST:trust"`
 }

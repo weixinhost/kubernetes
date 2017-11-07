@@ -24,12 +24,11 @@ import (
 
 	"github.com/ghodss/yaml"
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
-	"k8s.io/kubernetes/pkg/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 )
 
 type ViewLastAppliedOptions struct {
@@ -37,6 +36,7 @@ type ViewLastAppliedOptions struct {
 	Selector                     string
 	LastAppliedConfigurationList []string
 	OutputFormat                 string
+	All                          bool
 	Factory                      cmdutil.Factory
 	Out                          io.Writer
 	ErrOut                       io.Writer
@@ -73,7 +73,8 @@ func NewCmdApplyViewLastApplied(f cmdutil.Factory, out, err io.Writer) *cobra.Co
 	}
 
 	cmd.Flags().StringP("output", "o", "", "Output format. Must be one of yaml|json")
-	cmd.Flags().StringVarP(&options.Selector, "selector", "l", "", "Selector (label query) to filter on, supports '=', '==', and '!='.")
+	cmd.Flags().StringVarP(&options.Selector, "selector", "l", "", "Selector (label query) to filter on, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
+	cmd.Flags().BoolVar(&options.All, "all", false, "Select all resources in the namespace of the specified resource types")
 	usage := "that contains the last-applied-configuration annotations"
 	cmdutil.AddFilenameOptionFlags(cmd, &options.FilenameOptions, usage)
 
@@ -81,20 +82,22 @@ func NewCmdApplyViewLastApplied(f cmdutil.Factory, out, err io.Writer) *cobra.Co
 }
 
 func (o *ViewLastAppliedOptions) Complete(f cmdutil.Factory, args []string) error {
-	mapper, typer, err := f.UnstructuredObject()
-	if err != nil {
-		return err
-	}
-
 	cmdNamespace, enforceNamespace, err := f.DefaultNamespace()
 	if err != nil {
 		return err
 	}
 
-	r := resource.NewBuilder(mapper, f.CategoryExpander(), typer, resource.ClientMapperFunc(f.UnstructuredClientForMapping), unstructured.UnstructuredJSONScheme).
+	mapper, typer, err := f.UnstructuredObject()
+	if err != nil {
+		return err
+	}
+
+	r := f.NewBuilder().
+		Unstructured(f.UnstructuredClientForMapping, mapper, typer).
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		FilenameParam(enforceNamespace, &o.FilenameOptions).
 		ResourceTypeOrNameArgs(enforceNamespace, args...).
+		SelectAllParam(o.All).
 		SelectorParam(o.Selector).
 		Latest().
 		Flatten().
@@ -140,13 +143,13 @@ func (o *ViewLastAppliedOptions) RunApplyViewLastApplied() error {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(o.Out, string(jsonBuffer.Bytes()))
+			fmt.Fprint(o.Out, string(jsonBuffer.Bytes()))
 		case "yaml":
 			yamlOutput, err := yaml.JSONToYAML([]byte(str))
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(o.Out, string(yamlOutput))
+			fmt.Fprint(o.Out, string(yamlOutput))
 		}
 	}
 
@@ -164,6 +167,6 @@ func (o *ViewLastAppliedOptions) ValidateOutputArgs(cmd *cobra.Command) error {
 		o.OutputFormat = "yaml"
 		return nil
 	default:
-		return cmdutil.UsageError(cmd, "Unexpected -o output mode: %s, the flag 'output' must be one of yaml|json", format)
+		return cmdutil.UsageErrorf(cmd, "Unexpected -o output mode: %s, the flag 'output' must be one of yaml|json", format)
 	}
 }

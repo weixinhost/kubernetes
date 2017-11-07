@@ -27,12 +27,12 @@ import (
 
 	"github.com/golang/glog"
 
+	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/pkg/kubelet/config"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/pod"
 	"k8s.io/kubernetes/pkg/kubelet/status"
@@ -48,13 +48,21 @@ import (
 // if it has volumes. It also verifies that the pods in the desired state of the
 // world cache still exist, if not, it removes them.
 type DesiredStateOfWorldPopulator interface {
-	Run(stopCh <-chan struct{})
+	Run(sourcesReady config.SourcesReady, stopCh <-chan struct{})
 
 	// ReprocessPod removes the specified pod from the list of processedPods
 	// (if it exists) forcing it to be reprocessed. This is required to enable
 	// remounting volumes on pod updates (volumes like Downward API volumes
 	// depend on this behavior to ensure volume content is updated).
 	ReprocessPod(podName volumetypes.UniquePodName)
+
+	// HasAddedPods returns whether the populator has looped through the list
+	// of active pods and added them to the desired state of the world cache,
+	// at a time after sources are all ready, at least once. It does not
+	// return true before sources are all ready because before then, there is
+	// a chance many or all pods are missing from the list of active pods and
+	// so few to none will have been added.
+	HasAddedPods() bool
 }
 
 // NewDesiredStateOfWorldPopulator returns a new instance of
@@ -86,6 +94,8 @@ func NewDesiredStateOfWorldPopulator(
 			processedPods: make(map[volumetypes.UniquePodName]bool)},
 		kubeContainerRuntime:     kubeContainerRuntime,
 		keepTerminatedPodVolumes: keepTerminatedPodVolumes,
+		hasAddedPods:             false,
+		hasAddedPodsLock:         sync.RWMutex{},
 	}
 }
 
@@ -100,6 +110,8 @@ type desiredStateOfWorldPopulator struct {
 	kubeContainerRuntime      kubecontainer.Runtime
 	timeOfLastGetPodStatus    time.Time
 	keepTerminatedPodVolumes  bool
+	hasAddedPods              bool
+	hasAddedPodsLock          sync.RWMutex
 }
 
 type processedPods struct {
@@ -107,13 +119,28 @@ type processedPods struct {
 	sync.RWMutex
 }
 
-func (dswp *desiredStateOfWorldPopulator) Run(stopCh <-chan struct{}) {
+func (dswp *desiredStateOfWorldPopulator) Run(sourcesReady config.SourcesReady, stopCh <-chan struct{}) {
+	// Wait for the completion of a loop that started after sources are all ready, then set hasAddedPods accordingly
+	wait.PollUntil(dswp.loopSleepDuration, func() (bool, error) {
+		done := sourcesReady.AllReady()
+		dswp.populatorLoopFunc()()
+		return done, nil
+	}, stopCh)
+	dswp.hasAddedPodsLock.Lock()
+	dswp.hasAddedPods = true
+	dswp.hasAddedPodsLock.Unlock()
 	wait.Until(dswp.populatorLoopFunc(), dswp.loopSleepDuration, stopCh)
 }
 
 func (dswp *desiredStateOfWorldPopulator) ReprocessPod(
 	podName volumetypes.UniquePodName) {
 	dswp.deleteProcessedPod(podName)
+}
+
+func (dswp *desiredStateOfWorldPopulator) HasAddedPods() bool {
+	dswp.hasAddedPodsLock.RLock()
+	defer dswp.hasAddedPodsLock.RUnlock()
+	return dswp.hasAddedPods
 }
 
 func (dswp *desiredStateOfWorldPopulator) populatorLoopFunc() func() {
@@ -143,18 +170,7 @@ func (dswp *desiredStateOfWorldPopulator) isPodTerminated(pod *v1.Pod) bool {
 	if !found {
 		podStatus = pod.Status
 	}
-	return podStatus.Phase == v1.PodFailed || podStatus.Phase == v1.PodSucceeded || (pod.DeletionTimestamp != nil && notRunning(podStatus.ContainerStatuses))
-}
-
-// notRunning returns true if every status is terminated or waiting, or the status list
-// is empty.
-func notRunning(statuses []v1.ContainerStatus) bool {
-	for _, status := range statuses {
-		if status.State.Terminated == nil && status.State.Waiting == nil {
-			return false
-		}
-	}
-	return true
+	return volumehelper.IsPodTerminated(pod, podStatus)
 }
 
 // Iterate through all pods and add to desired state of world if they don't
@@ -223,11 +239,7 @@ func (dswp *desiredStateOfWorldPopulator) findAndRemoveDeletedPods() {
 			continue
 		}
 
-		glog.V(5).Infof(
-			"Removing volume %q (volSpec=%q) for pod %q from desired state.",
-			volumeToMount.VolumeName,
-			volumeToMount.VolumeSpec.Name(),
-			format.Pod(volumeToMount.Pod))
+		glog.V(5).Infof(volumeToMount.GenerateMsgDetailed("Removing volume from desired state", ""))
 
 		dswp.desiredStateOfWorld.DeletePodFromVolume(
 			volumeToMount.PodName, volumeToMount.VolumeName)
@@ -247,6 +259,8 @@ func (dswp *desiredStateOfWorldPopulator) processPodVolumes(pod *v1.Pod) {
 		return
 	}
 
+	allVolumesAdded := true
+
 	// Process volume spec for each volume defined in pod
 	for _, podVolume := range pod.Spec.Volumes {
 		volumeSpec, volumeGidValue, err :=
@@ -257,6 +271,7 @@ func (dswp *desiredStateOfWorldPopulator) processPodVolumes(pod *v1.Pod) {
 				podVolume.Name,
 				format.Pod(pod),
 				err)
+			allVolumesAdded = false
 			continue
 		}
 
@@ -270,6 +285,7 @@ func (dswp *desiredStateOfWorldPopulator) processPodVolumes(pod *v1.Pod) {
 				volumeSpec.Name(),
 				uniquePodName,
 				err)
+			allVolumesAdded = false
 		}
 
 		glog.V(10).Infof(
@@ -279,7 +295,11 @@ func (dswp *desiredStateOfWorldPopulator) processPodVolumes(pod *v1.Pod) {
 			uniquePodName)
 	}
 
-	dswp.markPodProcessed(uniquePodName)
+	// some of the volume additions may have failed, should not mark this pod as fully processed
+	if allVolumesAdded {
+		dswp.markPodProcessed(uniquePodName)
+	}
+
 }
 
 // podPreviouslyProcessed returns true if the volumes for this pod have already
@@ -314,6 +334,7 @@ func (dswp *desiredStateOfWorldPopulator) deleteProcessedPod(
 
 // createVolumeSpec creates and returns a mutatable volume.Spec object for the
 // specified volume. It dereference any PVC to get PV objects, if needed.
+// Returns an error if unable to obtain the volume at this time.
 func (dswp *desiredStateOfWorldPopulator) createVolumeSpec(
 	podVolume v1.Volume, podNamespace string) (*volume.Spec, string, error) {
 	if pvcSource :=
@@ -364,18 +385,7 @@ func (dswp *desiredStateOfWorldPopulator) createVolumeSpec(
 	}
 
 	// Do not return the original volume object, since the source could mutate it
-	clonedPodVolumeObj, err := api.Scheme.DeepCopy(&podVolume)
-	if err != nil || clonedPodVolumeObj == nil {
-		return nil, "", fmt.Errorf(
-			"failed to deep copy %q volume object. err=%v", podVolume.Name, err)
-	}
-
-	clonedPodVolume, ok := clonedPodVolumeObj.(*v1.Volume)
-	if !ok {
-		return nil, "", fmt.Errorf(
-			"failed to cast clonedPodVolume %#v to v1.Volume",
-			clonedPodVolumeObj)
-	}
+	clonedPodVolume := podVolume.DeepCopy()
 
 	return volume.NewSpecFromVolume(clonedPodVolume), "", nil
 }
@@ -386,7 +396,7 @@ func (dswp *desiredStateOfWorldPopulator) createVolumeSpec(
 func (dswp *desiredStateOfWorldPopulator) getPVCExtractPV(
 	namespace string, claimName string) (string, types.UID, error) {
 	pvc, err :=
-		dswp.kubeClient.Core().PersistentVolumeClaims(namespace).Get(claimName, metav1.GetOptions{})
+		dswp.kubeClient.CoreV1().PersistentVolumeClaims(namespace).Get(claimName, metav1.GetOptions{})
 	if err != nil || pvc == nil {
 		return "", "", fmt.Errorf(
 			"failed to fetch PVC %s/%s from API server. err=%v",
@@ -396,6 +406,7 @@ func (dswp *desiredStateOfWorldPopulator) getPVCExtractPV(
 	}
 
 	if pvc.Status.Phase != v1.ClaimBound || pvc.Spec.VolumeName == "" {
+
 		return "", "", fmt.Errorf(
 			"PVC %s/%s has non-bound phase (%q) or empty pvc.Spec.VolumeName (%q)",
 			namespace,
@@ -414,7 +425,7 @@ func (dswp *desiredStateOfWorldPopulator) getPVSpec(
 	name string,
 	pvcReadOnly bool,
 	expectedClaimUID types.UID) (*volume.Spec, string, error) {
-	pv, err := dswp.kubeClient.Core().PersistentVolumes().Get(name, metav1.GetOptions{})
+	pv, err := dswp.kubeClient.CoreV1().PersistentVolumes().Get(name, metav1.GetOptions{})
 	if err != nil || pv == nil {
 		return nil, "", fmt.Errorf(
 			"failed to fetch PV %q from API server. err=%v", name, err)

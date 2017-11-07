@@ -18,11 +18,15 @@ limitations under the License.
 package options
 
 import (
+	"fmt"
+
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/apis/componentconfig"
 	"k8s.io/kubernetes/pkg/apis/componentconfig/v1alpha1"
-	"k8s.io/kubernetes/pkg/client/leaderelection"
+	"k8s.io/kubernetes/pkg/client/leaderelectionconfig"
+	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/factory"
 
 	// add the kubernetes feature gates
@@ -33,6 +37,10 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// SchedulerPolicyConfigMapKey defines the key of the element in the
+// scheduler's policy ConfigMap that contains scheduler's policy config.
+const SchedulerPolicyConfigMapKey string = "policy.cfg"
+
 // SchedulerServer has all the context and params needed to run a Scheduler
 type SchedulerServer struct {
 	componentconfig.KubeSchedulerConfiguration
@@ -42,15 +50,15 @@ type SchedulerServer struct {
 	// Kubeconfig is Path to kubeconfig file with authorization and master
 	// location information.
 	Kubeconfig string
-	// Dynamic conifguration for scheduler features.
+	// Dynamic configuration for scheduler features.
 }
 
 // NewSchedulerServer creates a new SchedulerServer with default parameters
 func NewSchedulerServer() *SchedulerServer {
 	versioned := &v1alpha1.KubeSchedulerConfiguration{}
-	api.Scheme.Default(versioned)
+	legacyscheme.Scheme.Default(versioned)
 	cfg := componentconfig.KubeSchedulerConfiguration{}
-	api.Scheme.Convert(versioned, &cfg, nil)
+	legacyscheme.Scheme.Convert(versioned, &cfg, nil)
 	cfg.LeaderElection.LeaderElect = true
 	s := SchedulerServer{
 		KubeSchedulerConfiguration: cfg,
@@ -64,7 +72,8 @@ func (s *SchedulerServer) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.Address, "address", s.Address, "The IP address to serve on (set to 0.0.0.0 for all interfaces)")
 	fs.StringVar(&s.AlgorithmProvider, "algorithm-provider", s.AlgorithmProvider, "The scheduling algorithm provider to use, one of: "+factory.ListAlgorithmProviders())
 	fs.StringVar(&s.PolicyConfigFile, "policy-config-file", s.PolicyConfigFile, "File with scheduler policy configuration. This file is used if policy ConfigMap is not provided or --use-legacy-policy-config==true")
-	fs.StringVar(&s.PolicyConfigMapName, "policy-configmap", s.PolicyConfigMapName, "Name of the ConfigMap object that contains scheduler's policy configuration. It must exist in the system namespace before scheduler initialization if --use-legacy-policy-config==false")
+	usage := fmt.Sprintf("Name of the ConfigMap object that contains scheduler's policy configuration. It must exist in the system namespace before scheduler initialization if --use-legacy-policy-config==false. The config must be provided as the value of an element in 'Data' map with the key='%v'", SchedulerPolicyConfigMapKey)
+	fs.StringVar(&s.PolicyConfigMapName, "policy-configmap", s.PolicyConfigMapName, usage)
 	fs.StringVar(&s.PolicyConfigMapNamespace, "policy-configmap-namespace", s.PolicyConfigMapNamespace, "The namespace where policy ConfigMap is located. The system namespace will be used if this is not provided or is empty.")
 	fs.BoolVar(&s.UseLegacyPolicyConfig, "use-legacy-policy-config", false, "When set to true, scheduler will ignore policy ConfigMap and uses policy config file")
 	fs.BoolVar(&s.EnableProfiling, "profiling", true, "Enable profiling via web interface host:port/debug/pprof/")
@@ -80,8 +89,9 @@ func (s *SchedulerServer) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&s.HardPodAffinitySymmetricWeight, "hard-pod-affinity-symmetric-weight", api.DefaultHardPodAffinitySymmetricWeight,
 		"RequiredDuringScheduling affinity is not symmetric, but there is an implicit PreferredDuringScheduling affinity rule corresponding "+
 			"to every RequiredDuringScheduling affinity rule. --hard-pod-affinity-symmetric-weight represents the weight of implicit PreferredDuringScheduling affinity rule.")
-	fs.StringVar(&s.FailureDomains, "failure-domains", api.DefaultFailureDomains, "Indicate the \"all topologies\" set for an empty topologyKey when it's used for PreferredDuringScheduling pod anti-affinity.")
+	fs.MarkDeprecated("hard-pod-affinity-symmetric-weight", "This option was moved to the policy configuration file")
+	fs.StringVar(&s.FailureDomains, "failure-domains", kubeletapis.DefaultFailureDomains, "Indicate the \"all topologies\" set for an empty topologyKey when it's used for PreferredDuringScheduling pod anti-affinity.")
 	fs.MarkDeprecated("failure-domains", "Doesn't have any effect. Will be removed in future version.")
-	leaderelection.BindFlags(&s.LeaderElection, fs)
+	leaderelectionconfig.BindFlags(&s.LeaderElection, fs)
 	utilfeature.DefaultFeatureGate.AddFlag(fs)
 }
