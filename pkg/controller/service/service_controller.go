@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"reflect"
+	"strings"
 
 	"github.com/golang/glog"
 	"k8s.io/api/core/v1"
@@ -354,8 +355,92 @@ func (s *ServiceController) persistUpdate(service *v1.Service) error {
 	return err
 }
 
+func parseNodeSelector(selector string) (map[string]string, error) {
+
+	lines := strings.Split(selector, ",")
+
+	ret := map[string]string{}
+
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		kv := strings.Split(l, "=")
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("Parse node selector rule failed:%s", selector)
+		}
+		ret[kv[0]] = kv[1]
+	}
+	return ret, nil
+}
+
+func (s *ServiceController) filterNodeListWithAnnotationAndNodeSlice(service *v1.Service, nodes []*v1.Node) ([]*v1.Node, error) {
+
+	annotations := service.GetAnnotations()
+
+	if annotations, ok := annotations["weixinhost.com/node-label-eq"]; ok && (annotations != "" && annotations != "*") {
+
+		var newNodes []*v1.Node
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, node := range nodes {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] != v {
+					cond = false
+					break
+				}
+			}
+
+			if cond {
+				newNodes = append(newNodes, node)
+			}
+		}
+		nodes = newNodes
+	}
+
+	if annotations, ok := annotations["weixinhost.com/node-label-eq"]; ok && (annotations != "") {
+		if annotations == "*" {
+			return nil, fmt.Errorf("Not supported * at annotations weixinhost.com/node-label-eq")
+		}
+		var newNodes []*v1.Node
+
+		kv, err := parseNodeSelector(annotations)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, node := range nodes {
+			cond := true
+			for k, v := range kv {
+				if node.Labels[k] == v {
+					cond = false
+					break
+				}
+			}
+
+			if cond {
+				newNodes = append(newNodes, node)
+			}
+		}
+		nodes = newNodes
+	}
+
+	return nodes, nil
+}
+
 func (s *ServiceController) ensureLoadBalancer(service *v1.Service) (*v1.LoadBalancerStatus, error) {
 	nodes, err := s.nodeLister.ListWithPredicate(getNodeConditionPredicate())
+	if err != nil {
+		return nil, err
+	}
+
+	filtedNodes, err := s.filterNodeListWithAnnotationAndNodeSlice(service, nodes)
+
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +448,7 @@ func (s *ServiceController) ensureLoadBalancer(service *v1.Service) (*v1.LoadBal
 	// - Only one protocol supported per service
 	// - Not all cloud providers support all protocols and the next step is expected to return
 	//   an error for unsupported protocols
-	return s.balancer.EnsureLoadBalancer(s.clusterName, service, nodes)
+	return s.balancer.EnsureLoadBalancer(s.clusterName, service, filtedNodes)
 }
 
 // ListKeys implements the interface required by DeltaFIFO to list the keys we
